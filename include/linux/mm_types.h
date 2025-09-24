@@ -216,6 +216,9 @@ struct page {
 	struct page *kmsan_shadow;
 	struct page *kmsan_origin;
 #endif
+
+	unsigned long sel4_cap_id;   /* capability ID */
+
 } _struct_page_alignment;
 
 /*
