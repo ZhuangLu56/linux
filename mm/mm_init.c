@@ -30,6 +30,7 @@
 #include <linux/crash_dump.h>
 #include <linux/execmem.h>
 #include <linux/vmstat.h>
+#include <linux/sel4_cslot_allocator.h>
 #include <linux/sel4_cap_system.h>
 #include "internal.h"
 #include "slab.h"
@@ -573,7 +574,7 @@ void __meminit __init_single_page(struct page *page, unsigned long pfn,
 	page_cpupid_reset_last(page);
 	page_kasan_tag_reset(page);
 
-	sel4_set_page_cap_id(page, INVALID_CAP_ID);
+	sel4_set_page_cslot_id(page, INVALID_CAP_ID);
 
 	INIT_LIST_HEAD(&page->lru);
 #ifdef WANT_PAGE_VIRTUAL
@@ -2456,6 +2457,21 @@ void __init memblock_free_pages(struct page *page, unsigned long pfn,
 		/* KMSAN will take care of these pages. */
 		return;
 	}
+
+	/* new feature for cap system in linux */
+	if (!cslot_allocator_init) {
+		sel4_cslot_allocator_init();
+	}
+
+	int cslot_id = sel4_cslot_alloc();
+	if (cslot_id <= 0) {
+		pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate cslot id for page\n",
+		       __func__);
+	}
+
+	sel4_set_page_cslot_id(page, cslot_id);
+	/* The `__free_pages_core` function is the entry point of the buddy system, where we set up the information for all root pages. */
+	seL4_buddy_root_page_init(page, cslot_id, PAGE_SIZE * (1 << order));
 
 	/* pages were reserved and not allocated */
 	clear_page_tag_ref(page);

@@ -2221,6 +2221,9 @@ static unsigned long __init free_low_memory_core_early(void)
 
 	memmap_init_reserved_pages();
 
+	/* Initialize the root cnode before freeing any memory */
+	seL4_init_root_cnode();
+
 	/*
 	 * We need to use NUMA_NO_NODE instead of NODE_DATA(0)->node_id
 	 *  because in some case like Node0 doesn't have RAM installed
@@ -2229,6 +2232,8 @@ static unsigned long __init free_low_memory_core_early(void)
 	for_each_free_mem_range(i, NUMA_NO_NODE, MEMBLOCK_NONE, &start, &end,
 				NULL)
 		count += __free_memory_core(start, end);
+
+	seL4_buddy_root_init_flag = true;
 
 	return count;
 }

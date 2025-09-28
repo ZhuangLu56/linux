@@ -55,6 +55,7 @@
 #include <linux/delayacct.h>
 #include <linux/cacheinfo.h>
 #include <linux/pgalloc_tag.h>
+#include <linux/sel4_cslot_allocator.h>
 #include <linux/sel4_cap_system.h>
 #include <asm/div64.h>
 #include "internal.h"
@@ -800,6 +801,8 @@ static inline void __free_one_page(struct page *page,
 	unsigned long combined_pfn;
 	struct page *buddy;
 	bool to_tail;
+	int tail_page_cslot;
+	int page_cslot = 0;
 
 	VM_BUG_ON(!zone_is_initialized(zone));
 	VM_BUG_ON_PAGE(page->flags & PAGE_FLAGS_CHECK_AT_PREP, page);
@@ -809,6 +812,17 @@ static inline void __free_one_page(struct page *page,
 	VM_BUG_ON_PAGE(bad_range(zone, page), page);
 
 	account_freepages(zone, 1 << order, migratetype);
+
+	/* delete all page cap */
+	if(cslot_allocator_init && seL4_buddy_root_init_flag) { 
+		if(order == MAX_ORDER) {
+			tail_page_cslot = sel4_get_page_cslot_id(page);
+			if(tail_page_cslot > INVALID_CAP_ID) {
+				page_cslot = seL4_CNode_Delete(tail_page_cslot);
+				sel4_set_page_cslot_id(page, page_cslot);
+			}
+		}
+	}
 
 	while (order < MAX_PAGE_ORDER) {
 		int buddy_mt = migratetype;
@@ -821,25 +835,6 @@ static inline void __free_one_page(struct page *page,
 		buddy = find_buddy_page_pfn(page, pfn, order, &buddy_pfn);
 		if (!buddy)
 			goto done_merging;
-
-		/* new feature for cap system in linux */
-		if(buddy_cap_init) {
-			unsigned long cap_id;
-
-			/* free the original page cap */
-			cap_id = sel4_get_page_cap_id(page);
-			if(cap_id > 0 && cap_id <= MAX_CAPS) {
-				sel4_cap_free(cap_id);
-        		sel4_set_page_cap_id(page, INVALID_CAP_ID);
-			}
-
-			/* free the buddy page cap */
-			cap_id = sel4_get_page_cap_id(buddy);
-			if(cap_id > 0 && cap_id <= MAX_CAPS) {
-				sel4_cap_free(cap_id);
-        		sel4_set_page_cap_id(buddy, INVALID_CAP_ID);
-			}
-		}
 
 		if (unlikely(order >= pageblock_order)) {
 			/*
@@ -854,6 +849,20 @@ static inline void __free_one_page(struct page *page,
 			    (!migratetype_is_mergeable(migratetype) ||
 			     !migratetype_is_mergeable(buddy_mt)))
 				goto done_merging;
+		}
+
+		/* new feature for cap system in linux */
+		if(cslot_allocator_init && seL4_buddy_root_init_flag) {
+			
+			tail_page_cslot = sel4_get_page_cslot_id(page);
+			if(tail_page_cslot > INVALID_CAP_ID) {
+				page_cslot = seL4_CNode_Delete(tail_page_cslot);
+			}
+
+			tail_page_cslot = sel4_get_page_cslot_id(buddy);
+			if(tail_page_cslot > INVALID_CAP_ID) {
+				page_cslot = seL4_CNode_Delete(tail_page_cslot);
+			}
 		}
 
 		/*
@@ -878,20 +887,7 @@ static inline void __free_one_page(struct page *page,
 		page = page + (combined_pfn - pfn);
 		pfn = combined_pfn;
 		order++;
-
-		/* new feature for cap system in linux */
-		if(buddy_cap_init) {
-			unsigned long cap_id;
-			
-			/* alloc cap for merge page */
-			cap_id = sel4_cap_alloc(page, PAGE_SIZE);
-			if (cap_id <= 0 || cap_id > MAX_CAPS) {
-				pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate capability for page\n", __func__);
-				sel4_set_page_cap_id(page, INVALID_CAP_ID);
-			} else {
-				sel4_set_page_cap_id(page, cap_id);
-			}
-		}
+		sel4_set_page_cslot_id(page, page_cslot);
 	}
 
 done_merging:
@@ -1455,32 +1451,34 @@ static inline unsigned int expand(struct zone *zone, struct page *page, int low,
 		VM_BUG_ON_PAGE(bad_range(zone, &page[size]), &page[size]);
 
 		/* new feature for cap system in linux */
-		if(buddy_cap_init) {
-			unsigned long cap_id;
+		if(cslot_allocator_init && seL4_buddy_root_init_flag) {
+			unsigned long src_cslot_id, dest_cslot_id;
 
-			/* free the merge cap */
-			cap_id = sel4_get_page_cap_id(page);
-			if(cap_id > 0 && cap_id <= MAX_CAPS) {
-				sel4_cap_free(cap_id);
-        		sel4_set_page_cap_id(page, INVALID_CAP_ID);
-			}
+			/* get merge cap id */
+			src_cslot_id = sel4_get_page_cslot_id(page);
 
 			/* alloc cap for right page */
-		    cap_id = sel4_cap_alloc(&page[size], PAGE_SIZE);
-			if (cap_id <= 0 || cap_id > MAX_CAPS) {
+		    dest_cslot_id = sel4_cslot_alloc();
+			if (dest_cslot_id <= 0 || dest_cslot_id >= MAX_CSLOTS) {
 				pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate capability for page\n", __func__);
-				sel4_set_page_cap_id(&page[size], INVALID_CAP_ID);
+				sel4_set_page_cslot_id(&page[size], INVALID_CAP_ID);
 			} else {
-				sel4_set_page_cap_id(&page[size], cap_id);
+				sel4_set_page_cslot_id(&page[size], dest_cslot_id);
+				/* perform the first retype */
+				seL4_Untype_Retype(src_cslot_id, dest_cslot_id, OBJ_UNTYPED,
+					PAGE_SIZE * size, &page[size]);
 			}
 
 			/* alloc cap for left page */
-			cap_id = sel4_cap_alloc(page, PAGE_SIZE);
-			if (cap_id <= 0 || cap_id > MAX_CAPS) {
+			dest_cslot_id = sel4_cslot_alloc();
+			if (dest_cslot_id <= 0 || dest_cslot_id >= MAX_CSLOTS) {
 				pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate capability for page\n", __func__);
-				sel4_set_page_cap_id(page, INVALID_CAP_ID);
+				sel4_set_page_cslot_id(page, INVALID_CAP_ID);
 			} else {
-				sel4_set_page_cap_id(page, cap_id);
+				sel4_set_page_cslot_id(page, dest_cslot_id);
+				/* perform the second retype */
+				seL4_Untype_Retype(src_cslot_id, dest_cslot_id, OBJ_UNTYPED,
+					PAGE_SIZE * size, &page);
 			}
 		}
 
@@ -4843,13 +4841,6 @@ EXPORT_SYMBOL_GPL(alloc_pages_bulk_noprof);
 struct page *__alloc_pages_noprof(gfp_t gfp, unsigned int order,
 				      int preferred_nid, nodemask_t *nodemask)
 {
-	
-	/* new feature for cap system in linux */
-	if (!buddy_cap_init)
-	{
-		sel4_cap_system_init();
-	}
-
 	struct page *page;
 	unsigned int alloc_flags = ALLOC_WMARK_LOW;
 	gfp_t alloc_gfp; /* The gfp_t that was actually used for allocation */
@@ -4909,18 +4900,23 @@ out:
 	kmsan_alloc_page(page, order, alloc_gfp);
 
 	/* new feature for cap system in linux */
-	if(page && buddy_cap_init) {
-			unsigned long cap_id;
-			cap_id = sel4_get_page_cap_id(page);
-			if(cap_id > 0) { 
-				return page;
-			}
-		    cap_id = sel4_cap_alloc(page, PAGE_SIZE);
-			if (cap_id <= 0 || cap_id > MAX_CAPS) {
-					pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate capability for page\n", __func__);
-					sel4_set_page_cap_id(page, INVALID_CAP_ID);
-				} else {
-					sel4_set_page_cap_id(page, cap_id);
+	if(page && cslot_allocator_init && seL4_buddy_root_init_flag) {
+			int i;
+			unsigned long cslot_id, src_cslot_id;
+
+			src_cslot_id = sel4_get_page_cslot_id(page);
+			if(src_cslot_id > INVALID_CAP_ID) {
+				for (i = 0; i < (1 << order); i++) {
+					cslot_id = sel4_cslot_alloc();
+					if (cslot_id <= 0 || cslot_id > MAX_CSLOTS) {
+							pr_err("ZhuangL error: %s >>>>>>>>>>>>>>> Failed to allocate capability for page\n", __func__);
+							sel4_set_page_cslot_id(page + i, INVALID_CAP_ID);
+						} else {
+							sel4_set_page_cslot_id(page + i, cslot_id);
+					}
+					/* each page should retype from untyped cap to page cap */
+					seL4_Untype_Retype(src_cslot_id, cslot_id, OBJ_PAGE, PAGE_SIZE, (page + i));
+				}
 			}
 	}
 
@@ -5002,18 +4998,7 @@ void free_pages(unsigned long addr, unsigned int order)
 		
 		VM_BUG_ON(!virt_addr_valid((void *)addr));
 
-		/* new feature for cap system in linux */
 		page = (struct page*)virt_to_page((void *)addr);
-
-		if(buddy_cap_init) {
-			unsigned long cap_id = 0;
-			cap_id = sel4_get_page_cap_id(page);
-
-			if (cap_id > 0 && cap_id <= MAX_CAPS) {
-				sel4_cap_free(cap_id);
-				sel4_set_page_cap_id(page, INVALID_CAP_ID);
-			}
-		}
 
 		__free_pages(page, order);
 	}

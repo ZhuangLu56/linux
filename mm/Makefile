@@ -70,6 +70,7 @@ obj-y += memblock.o
 obj-y += $(memory-hotplug-y)
 obj-y += slub.o
 obj-y += sel4_cap_system.o
+obj-y += sel4_cslot_allocator.o
 
 ifdef CONFIG_MMU
 	obj-$(CONFIG_ADVISE_SYSCALLS)	+= madvise.o
